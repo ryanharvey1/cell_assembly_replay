@@ -196,6 +196,7 @@ def runPatterns(actmat, method='ica', nullhyp = 'mp', nshu = 1000, percentile = 
                 print('WARNING !')
                 print('    no assembly detecded!')
                 patterns = []
+                zactmat = []
         else:
                 # extracting co-activation patterns
                 patterns_ = extractPatterns(zactmat_,significance,method)
@@ -212,15 +213,21 @@ def runPatterns(actmat, method='ica', nullhyp = 'mp', nshu = 1000, percentile = 
     
 def computeAssemblyActivity(patterns,zactmat,zerodiag = True):
 
-        nassemblies = len(patterns)
-        nbins = np.size(zactmat,1)
-
-        assemblyAct = np.zeros((nassemblies,nbins))
-        for (assemblyi,pattern) in enumerate(patterns):
-                projMat = np.outer(pattern,pattern)
-                projMat -= zerodiag*np.diag(np.diag(projMat))
-                for bini in range(nbins):
-                        assemblyAct[assemblyi,bini] = \
-                                np.dot(np.dot(zactmat[:,bini],projMat),zactmat[:,bini])
-                        
+    if len(patterns) == 0:
+        print('WARNING !')
+        print('    no assembly detecded!')
+        assemblyAct = []
         return assemblyAct
+    
+    nassemblies = len(patterns)
+    nbins = np.size(zactmat,1)
+
+    assemblyAct = np.zeros((nassemblies,nbins))
+    for (assemblyi,pattern) in enumerate(patterns):
+            projMat = np.outer(pattern,pattern)
+            projMat -= zerodiag*np.diag(np.diag(projMat))
+            for bini in range(nbins):
+                    assemblyAct[assemblyi,bini] = \
+                            np.dot(np.dot(zactmat[:,bini],projMat),zactmat[:,bini])
+
+    return assemblyAct
