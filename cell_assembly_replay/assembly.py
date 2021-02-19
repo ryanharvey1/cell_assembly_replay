@@ -1,7 +1,18 @@
+'''
+	Codes for PCA/ICA methods described in Detecting cell assemblies in large neuronal populations, Lopes-dos-Santos et al (2013).
+											https://doi.org/10.1016/j.jneumeth.2013.04.010
+	This implementation was written in Feb 2019.
+	Please e-mail me if you have comments, doubts, bug reports or criticism (Vítor, vtlsantos@gmail.com /  vitor.lopesdossantos@pharm.ox.ac.uk).
+'''
+
+
 import numpy.matlib
 from sklearn.decomposition import PCA
 from scipy import stats
 import numpy as np
+
+__author__ = "Vítor Lopes dos Santos"
+__version__ = "2019.1"
 
 def toyExample(assemblies, nneurons = 10, nbins = 1000, rate = 1.):
         
