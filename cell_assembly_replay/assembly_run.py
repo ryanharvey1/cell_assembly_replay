@@ -14,7 +14,7 @@ def load_add_spikes(spike_path,session,fs=32000):
     session_bounds = nel.EpochArray([min(spikes_), max(spikes_)])
     return nel.SpikeTrainArray(timestamps=spikes, support=session_bounds, fs=fs)
     
-def run_all(session,spike_path,swr_df):
+def run_all(session,spike_path,swr_df,cell_list):
     '''
     run_all: loads data and runs analysis 
     '''
@@ -25,42 +25,74 @@ def run_all(session,spike_path,swr_df):
     dt = 0.025
     binned_st = st.bin(ds=dt)
     
-    # detect assemblies using methods from Lopes-dos-Santos et al (2013)
-    patterns, significance, zactmat = assembly.runPatterns(binned_st.data)
-    assemblyAct = assembly.computeAssemblyActivity(patterns, zactmat)
+    # There may be multiple simultaneous brain regions recorded
+    # Split and run each region seperately
+    session_ = []
+    area = []
+    area_ripple = []
+    assembl_strength = []
+    assembl_frac = []
+    n_assembl = []  
+    n_units = []  
+    n_assembl_n_cell_frac = []  
+    n_cells_per_assembl = []  
+    patterns_ = []  
+    significance_ = []  
+    zactmat_ = []  
+    assemblyAct_ = []
     
-    if len(assemblyAct) == 0:
-        assembl_strength = np.full([swr_df[swr_df.session == session].shape[0]], np.nan)
-        assembl_frac = np.full([swr_df[swr_df.session == session].shape[0]], np.nan)
-        n_assembl = np.nan
-        n_units = np.nan
-        n_assembl_n_cell_frac = np.nan
-        n_cells_per_assembl = np.nan
-    else:
-        assembl_strength = []
-        assembl_frac = []
-        for ripple in swr_df[swr_df.session == session].itertuples():
-            curr_assembl = assemblyAct[:,(binned_st.bin_centers >= ripple.start_time) & (binned_st.bin_centers <= ripple.end_time)]
-            # Assembly strength during SPW-R periods
-            assembl_strength.append(curr_assembl[curr_assembl > 5].mean())
-            # fraction of active assemblies active during SPW-R 
-            assembl_frac.append(sum(np.any(curr_assembl > 5,axis=1)) / curr_assembl.shape[0])
-
-        n_assembl = patterns.shape[0]
-        n_units = patterns.shape[1]
-        n_assembl_n_cell_frac = n_assembl/n_units
+    areas = cell_list.area[cell_list.session == session] 
+    for a in pd.unique(areas):
         
-        # number of cells that contribute significantly (>2 SD) to each assembly     
-        n_cells_per_assembl = np.sum(patterns > (patterns.mean(axis=1) + patterns.std(axis=1)*2)[:, np.newaxis],axis=1)
-        n_cells_per_assembl = n_cells_per_assembl[n_cells_per_assembl > 0].mean()    
+        # store brain region
+        area.append(a)
+        session_.append(session)   
+        
+        # detect assemblies using methods from Lopes-dos-Santos et al (2013)
+        patterns, significance, zactmat = assembly.runPatterns(binned_st.data[areas==a,:])
+        assemblyAct = assembly.computeAssemblyActivity(patterns, zactmat)
+
+        patterns_.append(patterns)
+        significance_.append(significance)
+        zactmat_.append(zactmat)
+        assemblyAct_.append(assemblyAct)
+        
+        # calc features per ripple
+        if len(assemblyAct) == 0:
+            area_ripple.append(np.full([swr_df[swr_df.session == session].shape[0]], a))
+            assembl_strength.append(np.full([swr_df[swr_df.session == session].shape[0]], np.nan))
+            assembl_frac.append(np.full([swr_df[swr_df.session == session].shape[0]], np.nan))
+            
+            n_assembl.append(np.nan)
+            n_units.append(np.nan)
+            n_assembl_n_cell_frac.append(np.nan)
+            n_cells_per_assembl.append(np.nan)
+        else:
+            for ripple in swr_df[swr_df.session == session].itertuples():
+                area_ripple.append(a)
+                curr_assembl = assemblyAct[:,(binned_st.bin_centers >= ripple.start_time) & (binned_st.bin_centers <= ripple.end_time)]
+                # Assembly strength during SPW-R periods
+                assembl_strength.append(curr_assembl[curr_assembl > 5].mean())
+                # fraction of active assemblies active during SPW-R 
+                assembl_frac.append(sum(np.any(curr_assembl > 5,axis=1)) / curr_assembl.shape[0])
+
+            n_assembl.append(patterns.shape[0])
+            n_units.append(patterns.shape[1])
+            n_assembl_n_cell_frac.append(patterns.shape[0]/patterns.shape[1])
+
+            # number of cells that contribute significantly (>2 SD) to each assembly     
+            n_cells_per_assembl_ = np.sum(patterns > (patterns.mean(axis=1) + patterns.std(axis=1)*2)[:, np.newaxis],axis=1)
+            n_cells_per_assembl.append(n_cells_per_assembl_[n_cells_per_assembl_ > 0].mean())  
 
     # package data
     results = {}
-    results['patterns'] = patterns
-    results['significance'] = significance
-    results['zactmat'] = zactmat
-    results['assemblyAct'] = assemblyAct
-    results['session'] = session
+    results['patterns'] = patterns_
+    results['significance'] = significance_
+    results['zactmat'] = zactmat_
+    results['assemblyAct'] = assemblyAct_
+    results['session'] = session_
+    results['area'] = area
+    results['area_ripple'] = area_ripple
     results['assembl_strength'] = assembl_strength
     results['assembl_frac'] = assembl_frac
     results['n_assembl'] = n_assembl
@@ -70,7 +102,7 @@ def run_all(session,spike_path,swr_df):
     
     return results
 
-def main_loop(session,spike_path,save_path,swr_df):
+def main_loop(session,spike_path,save_path,swr_df,cell_list):
     '''
     main_loop: file management 
     '''
@@ -84,20 +116,20 @@ def main_loop(session,spike_path,save_path,swr_df):
         return
         
     # detect ripples and calc some features
-    results = run_all(session,spike_path,swr_df)   
+    results = run_all(session,spike_path,swr_df,cell_list)   
 
     # save file
     with open(save_file, 'wb') as f:
         pickle.dump(results, f)
         
-def assembly_run(spike_path,save_path,swr_df,parallel=True):
+def assembly_run(spike_path,save_path,swr_df,cell_list,parallel=True):
     # find sessions to run
     sessions = pd.unique(swr_df.session)
 
     if parallel:
         num_cores = multiprocessing.cpu_count()         
-        processed_list = Parallel(n_jobs=num_cores)(delayed(main_loop)(session,spike_path,save_path,swr_df) for session in sessions)
+        processed_list = Parallel(n_jobs=num_cores)(delayed(main_loop)(session,spike_path,save_path,swr_df,cell_list) for session in sessions)
     else:    
         for session in sessions:
             print(session)
-            main_loop(session,spike_path,save_path,swr_df)
+            main_loop(session,spike_path,save_path,swr_df,cell_list)
