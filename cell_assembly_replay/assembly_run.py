@@ -28,6 +28,7 @@ def run_all(session,spike_path,swr_df,cell_list):
     # There may be multiple simultaneous brain regions recorded
     # Split and run each region seperately
     session_ = []
+    session_ripple = []
     area = []
     area_ripple = []
     assembl_strength = []
@@ -59,7 +60,10 @@ def run_all(session,spike_path,swr_df,cell_list):
         
         # calc features per ripple
         if len(assemblyAct) == 0:
+            # save area and session
             area_ripple.append(np.full([swr_df[swr_df.session == session].shape[0]], a))
+            session_ripple.append(np.full([swr_df[swr_df.session == session].shape[0]], session))
+            
             assembl_strength.append(np.full([swr_df[swr_df.session == session].shape[0]], np.nan))
             assembl_frac.append(np.full([swr_df[swr_df.session == session].shape[0]], np.nan))
             
@@ -69,7 +73,10 @@ def run_all(session,spike_path,swr_df,cell_list):
             n_cells_per_assembl.append(np.nan)
         else:
             for ripple in swr_df[swr_df.session == session].itertuples():
+                # save area and session
                 area_ripple.append(a)
+                session_ripple.append(session)
+                # pull out current assembly based on ripple width
                 curr_assembl = assemblyAct[:,(binned_st.bin_centers >= ripple.start_time) & (binned_st.bin_centers <= ripple.end_time)]
                 # Assembly strength during SPW-R periods
                 assembl_strength.append(curr_assembl[curr_assembl > 5].mean())
@@ -91,6 +98,7 @@ def run_all(session,spike_path,swr_df,cell_list):
     results['zactmat'] = zactmat_
     results['assemblyAct'] = assemblyAct_
     results['session'] = session_
+    results['session_ripple'] = session_ripple
     results['area'] = area
     results['area_ripple'] = area_ripple
     results['assembl_strength'] = assembl_strength
