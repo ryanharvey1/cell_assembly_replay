@@ -7,13 +7,28 @@ import nelpy as nel
 import multiprocessing
 from joblib import Parallel, delayed
 import pickle
+from scipy import stats
 
 def load_add_spikes(spike_path,session,fs=32000):
     spikes = np.load(os.path.join(spike_path,session)+'.npy', allow_pickle=True)
     spikes_ = list(itertools.chain(*spikes))
     session_bounds = nel.EpochArray([min(spikes_), max(spikes_)])
     return nel.SpikeTrainArray(timestamps=spikes, support=session_bounds, fs=fs)
-    
+
+def get_z_t(st):
+    '''
+    To increase the temporal resolution beyond the bin-size used to identify the assembly patterns,
+    z(t) was obtained by convolving the spike-train of each neuron with a kernel-function
+    '''
+    # bin to 1ms
+    z_t = st.bin(ds=0.001)
+    # make binary
+    z_t.data[z_t.data > 1] = 1
+    # gaussian kernel to match the bin-size used to identify the assembly patterns
+    z_t.smooth(sigma=0.025/np.sqrt(12),inplace=True)
+    # zscore
+    return stats.zscore(z_t.data,axis=1), z_t.bin_centers
+
 def run_all(session,spike_path,swr_df,cell_list):
     '''
     run_all: loads data and runs analysis 
@@ -25,6 +40,9 @@ def run_all(session,spike_path,swr_df,cell_list):
     dt = 0.025
     binned_st = st.bin(ds=dt)
     
+    # get smooth vector-function containing each neuron's z-scored instantaneous FR
+    z_t, ts = get_z_t(st)
+        
     # There may be multiple simultaneous brain regions recorded
     # Split and run each region seperately
     session_ = []
@@ -51,7 +69,7 @@ def run_all(session,spike_path,swr_df,cell_list):
         
         # detect assemblies using methods from Lopes-dos-Santos et al (2013)
         patterns, significance, zactmat = assembly.runPatterns(binned_st.data[areas==a,:])
-        assemblyAct = assembly.computeAssemblyActivity(patterns, zactmat)
+        assemblyAct = assembly.computeAssemblyActivity(patterns, z_t[areas==a,:])
 
         patterns_.append(patterns)
         significance_.append(significance)
@@ -77,16 +95,17 @@ def run_all(session,spike_path,swr_df,cell_list):
                 area_ripple.append(a)
                 session_ripple.append(session)
                 # pull out current assembly based on ripple width
-                curr_assembl = assemblyAct[:,(binned_st.bin_centers >= ripple.start_time) & (binned_st.bin_centers <= ripple.end_time)]
+                curr_assembl = assemblyAct[:,(ts >= ripple.start_time) & (ts <= ripple.end_time)]
                 # Assembly strength during SPW-R periods
-                assembl_strength.append(curr_assembl[curr_assembl > 5].mean())
+                assembl_strength.append(np.median(curr_assembl.max(axis=0)[curr_assembl.max(axis=0) > 5]))
+                
                 # fraction of active assemblies active during SPW-R 
                 assembl_frac.append(sum(np.any(curr_assembl > 5,axis=1)) / curr_assembl.shape[0])
 
             n_assembl.append(patterns.shape[0])
             n_units.append(patterns.shape[1])
             n_assembl_n_cell_frac.append(patterns.shape[0]/patterns.shape[1])
-
+ 
             # number of cells that contribute significantly (>2 SD) to each assembly     
             n_cells_per_assembl_ = np.sum(patterns > (patterns.mean(axis=1) + patterns.std(axis=1)*2)[:, np.newaxis],axis=1)
             n_cells_per_assembl.append(n_cells_per_assembl_[n_cells_per_assembl_ > 0].mean())  
