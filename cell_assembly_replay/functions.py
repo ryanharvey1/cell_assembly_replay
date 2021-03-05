@@ -128,6 +128,20 @@ def load_position(session):
     frames = np.transpose(np.array(f['frames']))
     return pd.DataFrame(frames,columns=['ts', 'x', 'y', 'hd', 'speed'])   
 
+def get_epochs(path):
+    f = h5py.File(path,'r')
+    ex_ep = []
+    for i in range(f['events'].shape[0]):
+        ex_ep.append(f['events'][i])
+    return ex_ep
+
+def get_maze_size_cm(path):
+    f = h5py.File(path,'r')
+    maze_size_cm = []
+    for i in range(f['maze_size_cm'].shape[0]):
+        maze_size_cm.append(f['maze_size_cm'][i][0])
+    return maze_size_cm  
+
 def get_spikes(filename):
     data = hdf5storage.loadmat(filename,variable_names=['Spikes'])
     spike_times=data['Spikes']
