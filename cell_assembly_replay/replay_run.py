@@ -223,19 +223,19 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type, fig
 
         if ep_type[idx] != "track":
             replay_type.append(np.nan)
-            continue
-            
-        # what side of the track is the rat on ? 
-        side = np.argmin(np.abs([0,120] - rat_x_position))
-        if (side == 1) & (slope < 0):
-            replay_type.append('forward')
-        elif (side == 1) & (slope > 0):
-            replay_type.append('reverse')
-        elif (side == 0) & (slope < 0):
-            replay_type.append('reverse')
-        elif (side == 0) & (slope > 0):
-            replay_type.append('forward')
-           
+        else:
+            # what side of the track is the rat on ? 
+            side = np.argmin(np.abs([0,120] - rat_x_position))
+            if (side == 1) & (slope < 0):
+                replay_type.append('forward')
+            elif (side == 1) & (slope > 0):
+                replay_type.append('reverse')
+            elif (side == 0) & (slope < 0):
+                replay_type.append('reverse')
+            elif (side == 0) & (slope > 0):
+                replay_type.append('forward')
+            else:
+                replay_type.append(np.nan)
         if figs:
             fig = plt.figure(figsize=(4,3))
             ax = plt.gca()
@@ -251,107 +251,144 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
     """
     Main function that conducts the replay analysis
     """
-    maze_size_cm,pos,st = get_base_data(data_path,spike_path,session)
+
+    maze_size_cm,pos,st_all = get_base_data(data_path,spike_path,session)
 
     # to make everything more simple, lets restrict to just the linear track
     pos = pos[0]
-    st = st[0]
+    st_all = st_all[0]
     maze_size_cm = maze_size_cm[0]
-
+    
     # compute and smooth speed
     speed1 = nel.utils.ddt_asa(pos, smooth=True, sigma=0.1, norm=True)
 
     # find epochs where the animal ran > 4cm/sec
     run_epochs = nel.utils.get_run_epochs(speed1, v1=4, v2=4)
-
-    st_run = st[run_epochs] # restrict spike trains to those epochs during which the animal was running
-    ds_run = 0.5 
-    ds_50ms = 0.05
-    # smooth and re-bin:
-    #     sigma = 0.3 # 300 ms spike smoothing
-    bst_run = st_run.bin(ds=ds_50ms).smooth(sigma=0.3 , inplace=True).rebin(w=ds_run/ds_50ms)
-
-    sigma = 0.2 # smoothing std dev in cm
-    tc = nel.TuningCurve1D(bst=bst_run, extern=pos, n_extern=40, extmin=0, extmax=maze_size_cm, sigma=sigma, min_duration=1)
-
-    # locate pyr cells that have at least 100 spikes and a peak rate at least 1 Hz
-    temp_df = df_cell_class[df_cell_class.session == session]
-    unit_ids_to_keep = (np.where(((temp_df.cell_type == "pyr")) &
-                                 (temp_df.n_spikes >=100) &
-                                 (tc.ratemap.max(axis=1) >=1) )[0]+1).squeeze().tolist()
-
-    sta_placecells = st._unit_subset(unit_ids_to_keep)
-    tc = tc._unit_subset(unit_ids_to_keep)
-    # tc.reorder_units(inplace=True)
     
-    # access decoding accuracy on behavioral time scale 
-    posteriors, lengths, mode_pth, mean_pth = nel.decoding.decode1D(bst_run.loc[:,unit_ids_to_keep], tc, xmin=0, xmax=maze_size_cm)
-    actual_pos = pos(bst_run.bin_centers)
-    slope, intercept, rvalue, pvalue, stderr = stats.linregress(actual_pos, mode_pth)
-    mean_error = np.mean(np.abs(actual_pos - mode_pth))
-    
-    # create intervals for PBEs epochs
-    # first restrict to current session and to track + pre/post intervals
-    temp_df = mua_df[(mua_df.session == session) & ((mua_df.ep_type == "pedestal_1") | (mua_df.ep_type == "track") | (mua_df.ep_type == "pedestal_2"))]
-    # restrict to events at least 100ms
-    temp_df = temp_df[temp_df.ripple_duration >= 0.1]
-    # make epoch object
-    PBEs = nel.EpochArray([np.array([temp_df.start_time,temp_df.end_time]).T])
-    
-    # bin data into 20ms 
-    bst_placecells = sta_placecells[PBEs].bin(ds=0.02)
-    # count units per event
-    n_active = [bst.n_active for bst in bst_placecells]
-    # decode each event
-    posteriors, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst_placecells, tc, xmin=0, xmax=maze_size_cm)
-    # score each event using weighted regression
-    scores, scores_time_swap, scores_col_cycle = get_scores(bst_placecells, posteriors, bdries, n_shuffles=1000)
-#     scores, scores_shuffled, percentile = replay.score_Davidson_final_bst_fast(bst_placecells,
-#                                                                                tc,w=0,n_shuffles=500,
-#                                                                                n_samples=1000) #Davidson method very slow
-    # find sig events using time and column shuffle distributions
-    sig_event_idx,pvalues_time_swap = get_significant_events(scores, scores_time_swap, q=95)
-    sig_event_idx,pvalues_col_cycle = get_significant_events(scores, scores_col_cycle, q=95)
+    # loop through each area seperately
+    areas = df_cell_class.area[df_cell_class.session == session] 
+    for current_area in pd.unique(areas):
+        
+        # subset units to current area
+        st = st_all._unit_subset(np.where(areas==current_area)[0]+1)
+        
+        # restrict spike trains to those epochs during which the animal was running
+        st_run = st[run_epochs] 
+        ds_run = 0.5 
+        ds_50ms = 0.05
+        # smooth and re-bin:
+        #     sigma = 0.3 # 300 ms spike smoothing
+        bst_run = st_run.bin(ds=ds_50ms).smooth(sigma=0.3 , inplace=True).rebin(w=ds_run/ds_50ms)
 
-    traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end = get_features(bst_placecells,
-                                                                                          posteriors,
-                                                                                          bdries,
-                                                                                          mode_pth,
-                                                                                          pos,
-                                                                                          list(temp_df.ep_type))
-    
-    _,slope,intercept,log_like = get_score_coef(bst_placecells,bdries,posteriors)
+        sigma = 0.2 # smoothing std dev in cm
+        tc = nel.TuningCurve1D(bst=bst_run,
+                               extern=pos,
+                               n_extern=40,
+                               extmin=0,
+                               extmax=maze_size_cm,
+                               sigma=sigma,
+                               min_duration=1)
 
+        # locate pyr cells that have at least 100 spikes and a peak rate at least 1 Hz
+        temp_df = df_cell_class[(df_cell_class.session == session) & (df_cell_class.area == current_area)]
+        unit_ids_to_keep = (np.where(((temp_df.cell_type == "pyr")) &
+                                     (temp_df.n_spikes >=100) &
+                                     (tc.ratemap.max(axis=1) >=1) )[0]+1).squeeze().tolist()
 
-    # package data into results dictionary
-    results = {}
+        sta_placecells = st._unit_subset(unit_ids_to_keep)
+        tc = tc._unit_subset(unit_ids_to_keep)
+        total_units = sta_placecells.n_active
+        # tc.reorder_units(inplace=True)
+
+        # access decoding accuracy on behavioral time scale 
+        posteriors, lengths, mode_pth, mean_pth = nel.decoding.decode1D(bst_run.loc[:,unit_ids_to_keep],
+                                                                        tc,
+                                                                        xmin=0,
+                                                                        xmax=maze_size_cm)
+        actual_pos = pos(bst_run.bin_centers)
+        slope, intercept, rvalue, pvalue, stderr = stats.linregress(actual_pos, mode_pth)
+        mean_error = np.mean(np.abs(actual_pos - mode_pth))
+
+        # create intervals for PBEs epochs
+        # first restrict to current session and to track + pre/post intervals
+        temp_df = mua_df[((mua_df.session == session) &
+                          ((mua_df.ep_type == "pedestal_1") |
+                           (mua_df.ep_type == "track") |
+                           (mua_df.ep_type == "pedestal_2")))]
+        # restrict to events at least 100ms
+        temp_df = temp_df[temp_df.ripple_duration >= 0.1]
+        # make epoch object
+        PBEs = nel.EpochArray([np.array([temp_df.start_time,temp_df.end_time]).T])
+
+        # bin data into 20ms 
+        bst_placecells = sta_placecells[PBEs].bin(ds=0.02)
+
+        # count units per event
+        n_active = [bst.n_active for bst in bst_placecells]
+        n_active = np.array(n_active) 
+        # restrict bst to instances with >= 5 active units
+        idx = n_active >= 5
+        bst_placecells = bst_placecells[np.where(idx)[0]]
+        # restrict df to instances with >= 5 active units
+        temp_df = temp_df[idx]
+        n_active = n_active[idx]
+
+        # decode each event
+        posteriors, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst_placecells,
+                                                                       tc,
+                                                                       xmin=0,
+                                                                       xmax=maze_size_cm)
+        # score each event using weighted regression
+        scores, scores_time_swap, scores_col_cycle = get_scores(bst_placecells,
+                                                                posteriors,
+                                                                bdries,
+                                                                n_shuffles=1000)
+    #     scores, scores_shuffled, percentile = replay.score_Davidson_final_bst_fast(bst_placecells,
+    #                                                                                tc,w=0,n_shuffles=500,
+    #                                                                                n_samples=1000) #Davidson method very slow
+        # find sig events using time and column shuffle distributions
+        sig_event_idx,pvalues_time_swap = get_significant_events(scores, scores_time_swap)
+        sig_event_idx,pvalues_col_cycle = get_significant_events(scores, scores_col_cycle)
+
+        traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end = get_features(bst_placecells,
+                                                                                              posteriors,
+                                                                                              bdries,
+                                                                                              mode_pth,
+                                                                                              pos,
+                                                                                              list(temp_df.ep_type))
+        _,slope,intercept,log_like = get_score_coef(bst_placecells,bdries,posteriors)
     
-    results['sta_placecells'] = sta_placecells
-    results['bst_placecells'] = bst_placecells
-    results['tc'] = tc
-    results['posteriors'] = posteriors
-    results['bdries'] = bdries
-    results['mode_pth'] = mode_pth
-    
-    # add event by event metrics to df
-    temp_df['n_active'] = n_active
-    temp_df['scores'] = scores
-    temp_df['slope'] = slope
-    temp_df['intercept'] = intercept
-    temp_df['log_like'] = log_like
-    temp_df['pvalues_time_swap'] = pvalues_time_swap
-    temp_df['pvalues_col_cycle'] = pvalues_col_cycle
-    temp_df['traj_dist'] = traj_dist
-    temp_df['traj_speed'] = traj_speed
-    temp_df['traj_step'] = traj_step
-    temp_df['replay_type'] = replay_type
-    temp_df['dist_rat_start'] = dist_rat_start
-    temp_df['dist_rat_end'] = dist_rat_end
-    results['df'] = temp_df
-    
-    results['session'] = session
-    results['decoding_r2'] = rvalue
-    results['decoding_mean_error'] = mean_error
+        # package data into results dictionary
+        results = {}
+        results[current_area] = {}
+
+        results[current_area]['sta_placecells'] = sta_placecells
+        results[current_area]['bst_placecells'] = bst_placecells
+        results[current_area]['tc'] = tc
+        results[current_area]['posteriors'] = posteriors
+        results[current_area]['bdries'] = bdries
+        results[current_area]['mode_pth'] = mode_pth
+
+        # add event by event metrics to df
+        temp_df['n_active'] = n_active
+        temp_df['scores'] = scores
+        temp_df['slope'] = slope
+        temp_df['intercept'] = intercept
+        temp_df['log_like'] = log_like
+        temp_df['pvalues_time_swap'] = pvalues_time_swap
+        temp_df['pvalues_col_cycle'] = pvalues_col_cycle
+        temp_df['traj_dist'] = traj_dist
+        temp_df['traj_speed'] = traj_speed
+        temp_df['traj_step'] = traj_step
+        temp_df['replay_type'] = replay_type
+        temp_df['dist_rat_start'] = dist_rat_start
+        temp_df['dist_rat_end'] = dist_rat_end
+        results[current_area]['df'] = temp_df
+
+        results[current_area]['session'] = session
+        results[current_area]['decoding_r2'] = rvalue
+        results[current_area]['decoding_mean_error'] = mean_error
+        results[current_area]['total_units'] = total_units
 
     return results
 
@@ -384,7 +421,13 @@ def replay_run(data_path,spike_path,save_path,mua_df,df_cell_class,parallel=True
 
     if parallel:
         num_cores = multiprocessing.cpu_count()         
-        processed_list = Parallel(n_jobs=num_cores)(delayed(main_loop)(session,data_path,spike_path,save_path,mua_df,df_cell_class) for session in sessions)
+        processed_list = Parallel(n_jobs=num_cores)(delayed(main_loop)(session,
+                                                                       data_path,
+                                                                       spike_path,
+                                                                       save_path,
+                                                                       mua_df,
+                                                                       df_cell_class
+                                                                       ) for session in sessions)
     else:    
         for session in sessions:
             print(session)
