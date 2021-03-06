@@ -91,6 +91,71 @@ def score_array(posterior):
 
     return results.rsquared,slope,intercept,log_like
 
+def get_score_coef(bst,bdries,posterior):
+    scores = np.zeros(bst.n_epochs)
+    slope = np.zeros(bst.n_epochs)
+    intercept = np.zeros(bst.n_epochs)
+    log_like = np.zeros(bst.n_epochs)
+
+    for idx in range(bst.n_epochs):
+        posterior_array = posterior[:, bdries[idx]:bdries[idx+1]]
+        scores[idx],slope[idx],intercept[idx],log_like[idx] = score_array(posterior_array)
+    return scores,slope,intercept,log_like
+
+def get_scores(bst, posterior, bdries, n_shuffles=500):
+#     posterior, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst, tuningcurve, xmin=0, xmax=120)
+
+    scores = np.zeros(bst.n_epochs)
+    if n_shuffles > 0:
+        scores_time_swap = np.zeros((n_shuffles, bst.n_epochs))
+        scores_col_cycle = np.zeros((n_shuffles, bst.n_epochs))
+
+    for idx in range(bst.n_epochs):
+        posterior_array = posterior[:, bdries[idx]:bdries[idx+1]]
+        scores[idx],_,_,_ = score_array(posterior_array)
+        
+        for shflidx in range(n_shuffles):
+            posterior_ts = replay.time_swap_array(posterior_array)
+            posterior_cs = replay.column_cycle_array(posterior_array)
+            scores_time_swap[shflidx, idx],_,_,_  = score_array(posterior=posterior_ts)
+            scores_col_cycle[shflidx, idx],_,_,_  = score_array(posterior=posterior_cs)
+            
+    return scores, scores_time_swap, scores_col_cycle  
+
+def get_significant_events(scores, shuffled_scores, q=95):
+    """Return the significant events based on percentiles.
+    NOTE: The score is compared to the distribution of scores obtained
+    using the randomized data and a Monte Carlo p-value can be computed
+    according to: p = (r+1)/(n+1), where r is the number of
+    randomizations resulting in a score higher than (ETIENNE EDIT: OR EQUAL TO?)
+    the real score and n is the total number of randomizations performed.
+    Parameters
+    ----------
+    scores : array of shape (n_events,)
+    shuffled_scores : array of shape (n_shuffles, n_events)
+    q : float in range of [0,100]
+        Percentile to compute, which must be between 0 and 100 inclusive.
+    Returns
+    -------
+    sig_event_idx : array of shape (n_sig_events,)
+        Indices (from 0 to n_events-1) of significant events.
+    pvalues :
+    """
+
+    n, _ = shuffled_scores.shape
+    r = np.sum(abs(shuffled_scores) >= abs(scores), axis=0)
+    pvalues = (r+1)/(n+1)
+
+    # set nan scores to 1
+    pvalues[np.isnan(scores)] = 1
+    
+    sig_event_idx = np.argwhere(scores > np.percentile(
+        shuffled_scores,
+        axis=0,
+        q=q)).squeeze()
+
+    return np.atleast_1d(sig_event_idx), np.atleast_1d(pvalues)
+
 def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type,figs=False):
 
     traj_dist = []
@@ -204,27 +269,49 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
     
     # bin data into 20ms 
     bst_placecells = sta_placecells[PBEs].bin(ds=0.02)
+    # count units per event
+    n_active = [bst.n_active for bst in bst_placecells]
     # decode each event
     posteriors, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst_placecells, tc, xmin=0, xmax=maze_size_cm)
     # score each event
-    scores, scores_shuffled, percentile = replay.score_Davidson_final_bst_fast(bst_placecells,tc,w=0,n_shuffles=500,n_samples=1000)
+    scores, scores_time_swap, scores_col_cycle = get_scores(bst_placecells, posteriors, bdries, n_shuffles=1000)
+#     scores, scores_shuffled, percentile = replay.score_Davidson_final_bst_fast(bst_placecells,tc,w=0,n_shuffles=500,n_samples=1000)
     # find sig events
-    sig_event_idx,pvalues = replay.get_significant_events(scores, scores_shuffled.T, q=95)
+    sig_event_idx,pvalues_time_swap = get_significant_events(scores, scores_time_swap, q=95)
+    sig_event_idx,pvalues_col_cycle = get_significant_events(scores, scores_col_cycle, q=95)
 
     traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end = get_features(bst_placecells, posteriors, bdries, mode_pth, pos, list(temp_df.ep_type))
     
-    # package data
+    _,slope,intercept,log_like = get_score_coef(bst_placecells,bdries,posteriors)
+
+
+    # package data into results dictionary
     results = {}
+    
+    results['sta_placecells'] = sta_placecells
+    results['bst_placecells'] = bst_placecells
+    results['tc'] = tc
+    results['posteriors'] = posteriors
+    results['bdries'] = bdries
+    results['mode_pth'] = mode_pth
+    
+    # add event by event metrics to df
+    temp_df['n_active'] = n_active
+    temp_df['scores'] = scores
+    temp_df['slope'] = slope
+    temp_df['intercept'] = intercept
+    temp_df['log_like'] = log_like
+    temp_df['pvalues_time_swap'] = pvalues_time_swap
+    temp_df['pvalues_col_cycle'] = pvalues_col_cycle
+    temp_df['traj_dist'] = traj_dist
+    temp_df['traj_speed'] = traj_speed
+    temp_df['traj_step'] = traj_step
+    temp_df['replay_type'] = replay_type
+    temp_df['dist_rat_start'] = dist_rat_start
+    temp_df['dist_rat_end'] = dist_rat_end
     results['df'] = temp_df
-    results['scores'] = scores
-    results['sig_event_idx'] = sig_event_idx
-    results['pvalues'] = pvalues
-    results['traj_dist'] = traj_dist
-    results['traj_speed'] = traj_speed
-    results['traj_step'] = traj_step
-    results['replay_type'] = replay_type
-    results['dist_rat_start'] = dist_rat_start
-    results['dist_rat_end'] = dist_rat_end
+    
+    results['session'] = session
     results['decoding_r2'] = rvalue
     results['decoding_mean_error'] = mean_error
 
