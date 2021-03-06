@@ -24,9 +24,23 @@ import pickle
 
 
 def rescale(x,new_min,new_max):
+    """
+    simple function to rescale vector x by new min and max
+    """
     return ((x - min(x)) / (max(x) - min(x))) * ((new_max-new_min) + new_min)
 
 def rescale_coords(df,session_epochs,maze_size_cm):
+    """
+    rescale xy coordinates of each epoch into cm
+    note: automatically detects linear track by x to y ratio
+    
+    input:
+        df: [ts,x,y] pandas data frame
+        session_epochs: nelpy epoch class with epoch times
+        mazesize: list with size of maze in cm for each epoch
+    output:
+        df: rescaled df
+    """
     for i,val in enumerate(session_epochs.data):
         temp_df = df[df['ts'].between(val[0],val[1])]
         
@@ -43,9 +57,11 @@ def rescale_coords(df,session_epochs,maze_size_cm):
     return df
 
 def get_base_data(data_path,spike_path,session):
+    """
+    Load and format data for replay analysis
+    """
      # get data session path from mat file
     path = functions.get_session_path(os.path.join(data_path,session)+'.mat')
-
     # load position data from .mat file
     df = functions.load_position(os.path.join(data_path,session)+'.mat')
     # get the size of each maze
@@ -69,6 +85,10 @@ def get_base_data(data_path,spike_path,session):
     return maze_size_cm,pos,st
 
 def score_array(posterior):
+    """
+    takes in posterior matrix (distance by time) and conducts
+    weighted least squares
+    """
     nan_loc = np.isnan(posterior).any(axis=0)
 
     rows, cols = posterior.shape
@@ -92,6 +112,9 @@ def score_array(posterior):
     return results.rsquared,slope,intercept,log_like
 
 def get_score_coef(bst,bdries,posterior):
+    """
+    runs score_array on each event epoch in bst (binned spike train)
+    """
     scores = np.zeros(bst.n_epochs)
     slope = np.zeros(bst.n_epochs)
     intercept = np.zeros(bst.n_epochs)
@@ -103,6 +126,12 @@ def get_score_coef(bst,bdries,posterior):
     return scores,slope,intercept,log_like
 
 def get_scores(bst, posterior, bdries, n_shuffles=500):
+    """
+    runs score_array on observed data and then conducts a shuffle analysis using
+    two types of procedures (time swap and column cycle).
+    
+    Will run through each epoch in your binned spike train
+    """
 #     posterior, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst, tuningcurve, xmin=0, xmax=120)
 
     scores = np.zeros(bst.n_epochs)
@@ -156,8 +185,11 @@ def get_significant_events(scores, shuffled_scores, q=95):
 
     return np.atleast_1d(sig_event_idx), np.atleast_1d(pvalues)
 
-def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type,figs=False):
-
+def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type, figs=False):
+    """
+    Using the posterior probability matrix, calculate several features on spatial trajectory
+    and detects if the trajectory is foward or reverse depending on the rat's current position
+    """
     traj_dist = []
     traj_speed = []
     traj_step = []
@@ -170,7 +202,6 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type,figs
         nan_loc = np.isnan(posterior_array).any(axis=0)
 
         x = bst_placecells[idx].bin_centers
-        # x = np.linspace(0,cols*.02,cols)
         y = mode_pth[bdries[idx]:bdries[idx+1]]
 
         # get spatial difference between bins
@@ -208,10 +239,8 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type,figs
         if figs:
             fig = plt.figure(figsize=(4,3))
             ax = plt.gca()
-    #         npl.plot(pos,ax=ax)
             npl.plot(x,rat_event_pos,"^",color='brown',linewidth=10,ax=ax)
             ax.plot(x,y,'k',linewidth=2)
-    #         ax.scatter(x,y,c=x,linewidth=2,cmap='viridis')
             ax.scatter(x[0],y[0],color='g')
             ax.scatter(x[-1],y[-1],color='r')
             ax.set_title(replay_type[idx])
@@ -219,7 +248,9 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type,figs
     return traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end
 
 def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
-    
+    """
+    Main function that conducts the replay analysis
+    """
     maze_size_cm,pos,st = get_base_data(data_path,spike_path,session)
 
     # to make everything more simple, lets restrict to just the linear track
@@ -273,14 +304,21 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
     n_active = [bst.n_active for bst in bst_placecells]
     # decode each event
     posteriors, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst_placecells, tc, xmin=0, xmax=maze_size_cm)
-    # score each event
+    # score each event using weighted regression
     scores, scores_time_swap, scores_col_cycle = get_scores(bst_placecells, posteriors, bdries, n_shuffles=1000)
-#     scores, scores_shuffled, percentile = replay.score_Davidson_final_bst_fast(bst_placecells,tc,w=0,n_shuffles=500,n_samples=1000)
-    # find sig events
+#     scores, scores_shuffled, percentile = replay.score_Davidson_final_bst_fast(bst_placecells,
+#                                                                                tc,w=0,n_shuffles=500,
+#                                                                                n_samples=1000) #Davidson method very slow
+    # find sig events using time and column shuffle distributions
     sig_event_idx,pvalues_time_swap = get_significant_events(scores, scores_time_swap, q=95)
     sig_event_idx,pvalues_col_cycle = get_significant_events(scores, scores_col_cycle, q=95)
 
-    traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end = get_features(bst_placecells, posteriors, bdries, mode_pth, pos, list(temp_df.ep_type))
+    traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end = get_features(bst_placecells,
+                                                                                          posteriors,
+                                                                                          bdries,
+                                                                                          mode_pth,
+                                                                                          pos,
+                                                                                          list(temp_df.ep_type))
     
     _,slope,intercept,log_like = get_score_coef(bst_placecells,bdries,posteriors)
 
@@ -337,6 +375,10 @@ def main_loop(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         pickle.dump(results, f)
         
 def replay_run(data_path,spike_path,save_path,mua_df,df_cell_class,parallel=True):
+    """
+    function to loop through each session
+    you can use a basic loop or run in parallel
+    """
     # find sessions to run
     sessions = pd.unique(mua_df.session)
 
