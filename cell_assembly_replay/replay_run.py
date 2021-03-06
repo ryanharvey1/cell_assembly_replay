@@ -27,7 +27,7 @@ def rescale(x,new_min,new_max):
     """
     simple function to rescale vector x by new min and max
     """
-    return ((x - min(x)) / (max(x) - min(x))) * ((new_max-new_min) + new_min)
+    return ((x - np.nanmin(x)) / (np.nanmax(x) - np.nanmin(x))) * ((new_max-new_min) + new_min)
 
 def rescale_coords(df,session_epochs,maze_size_cm):
     """
@@ -44,8 +44,8 @@ def rescale_coords(df,session_epochs,maze_size_cm):
     for i,val in enumerate(session_epochs.data):
         temp_df = df[df['ts'].between(val[0],val[1])]
         
-        x_range = max(temp_df.x) - min(temp_df.x)
-        y_range = max(temp_df.y) - min(temp_df.y)
+        x_range = np.nanmax(temp_df.x) - np.nanmin(temp_df.x)
+        y_range = np.nanmax(temp_df.y) - np.nanmin(temp_df.y)
         x_y_ratio = x_range/y_range
         # if the ratio of x to y is > 5, it is probably a linear track
         if x_y_ratio > 5:
@@ -265,6 +265,9 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
     # find epochs where the animal ran > 4cm/sec
     run_epochs = nel.utils.get_run_epochs(speed1, v1=4, v2=4)
     
+    # set up results
+    results = {}
+
     # loop through each area seperately
     areas = df_cell_class.area[df_cell_class.session == session] 
     for current_area in pd.unique(areas):
@@ -294,7 +297,16 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         unit_ids_to_keep = (np.where(((temp_df.cell_type == "pyr")) &
                                      (temp_df.n_spikes >=100) &
                                      (tc.ratemap.max(axis=1) >=1) )[0]+1).squeeze().tolist()
-
+        
+        if isinstance(unit_ids_to_keep, int):
+            print('warning: only 1 unit')
+            results[current_area] = {}
+            continue
+        elif len(unit_ids_to_keep) == 0:
+            print('warning: no units')
+            results[current_area] = {}
+            continue
+            
         sta_placecells = st._unit_subset(unit_ids_to_keep)
         tc = tc._unit_subset(unit_ids_to_keep)
         total_units = sta_placecells.n_active
@@ -317,6 +329,12 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
                            (mua_df.ep_type == "pedestal_2")))]
         # restrict to events at least 100ms
         temp_df = temp_df[temp_df.ripple_duration >= 0.1]
+        
+        if temp_df.shape[0] == 0:
+            print('warning: no PBE events')
+            results[current_area] = {}
+            continue
+            
         # make epoch object
         PBEs = nel.EpochArray([np.array([temp_df.start_time,temp_df.end_time]).T])
 
@@ -359,7 +377,6 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         _,slope,intercept,log_like = get_score_coef(bst_placecells,bdries,posteriors)
     
         # package data into results dictionary
-        results = {}
         results[current_area] = {}
 
         results[current_area]['sta_placecells'] = sta_placecells
