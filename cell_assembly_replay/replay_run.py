@@ -101,6 +101,10 @@ def score_array(posterior):
     y = y[~nan_loc]
     w = w[~nan_loc]
     
+    # if only one time bin is active
+    if len(x)==1:
+        return np.nan,np.nan,np.nan,np.nan
+    
     X = sm.add_constant(x)
     wls_model = sm.WLS(y,X, weights=w)
     results = wls_model.fit()
@@ -274,6 +278,8 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         
         # subset units to current area
         st = st_all._unit_subset(np.where(areas==current_area)[0]+1)
+        # reset unit ids like the other units never existed
+        st.series_ids = np.arange(0,len(st.series_ids))+1
         
         # restrict spike trains to those epochs during which the animal was running
         st_run = st[run_epochs] 
