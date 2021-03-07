@@ -21,7 +21,7 @@ from joblib import Parallel, delayed
 
 import statsmodels.api as sm
 import pickle
-
+import copy
 
 def rescale(x,new_min,new_max):
     """
@@ -83,6 +83,45 @@ def get_base_data(data_path,spike_path,session):
     st = nel.SpikeTrainArray(timestamps=spikes,support=session_bounds, fs=32000)
     
     return maze_size_cm,pos,st
+
+def decode_and_score(bst, tc, pos):
+    # access decoding accuracy on behavioral time scale 
+    posteriors, lengths, mode_pth, mean_pth = nel.decoding.decode1D(bst,
+                                                                    tc,
+                                                                    xmin=0,
+                                                                    xmax=np.nanmax(pos.data))
+    actual_pos = pos(bst.bin_centers)
+    slope, intercept, rvalue, pvalue, stderr = stats.linregress(actual_pos, mode_pth)
+    mean_error = np.mean(np.abs(actual_pos - mode_pth))
+    
+    return rvalue,mean_error
+
+def pooled_incoherent_shuffle_bst(bst):
+    out = copy.deepcopy(bst)
+    data = out._data
+
+    for uu in range(bst.n_units):
+        segment = np.atleast_1d(np.squeeze(data[uu, :]))
+        segment = np.roll(segment, np.random.randint(len(segment)))
+        data[uu, :] = segment
+    return out
+
+def decode_and_shuff(bst, tc, pos, n_shuffles=500):
+    """
+    """
+    
+    rvalue, mean_error = decode_and_score(bst, tc, pos)
+
+    scores = np.zeros(bst.n_epochs)
+    if n_shuffles > 0:
+        rvalue_time_swap = np.zeros((n_shuffles,1))
+        mean_error_time_swap = np.zeros((n_shuffles,1))
+        
+    for shflidx in range(n_shuffles):
+        bst_shuff = pooled_incoherent_shuffle_bst(bst)
+        rvalue_time_swap[shflidx], mean_error_time_swap[shflidx] = decode_and_score(bst_shuff, tc, pos)
+            
+    return rvalue, mean_error, rvalue_time_swap, mean_error_time_swap
 
 def score_array(posterior):
     """
@@ -319,13 +358,13 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         # tc.reorder_units(inplace=True)
 
         # access decoding accuracy on behavioral time scale 
-        posteriors, lengths, mode_pth, mean_pth = nel.decoding.decode1D(bst_run.loc[:,unit_ids_to_keep],
-                                                                        tc,
-                                                                        xmin=0,
-                                                                        xmax=maze_size_cm)
-        actual_pos = pos(bst_run.bin_centers)
-        slope, intercept, rvalue, pvalue, stderr = stats.linregress(actual_pos, mode_pth)
-        mean_error = np.mean(np.abs(actual_pos - mode_pth))
+        decoding_r2, mean_error, decoding_r2_shuff, _ = decode_and_shuff(bst_run.loc[:,unit_ids_to_keep],
+                                                                         tc,
+                                                                         pos,
+                                                                         n_shuffles=1000)
+        # check decoding quality against chance distribution
+        _, decoding_r2_pval = get_significant_events(decoding_r2, decoding_r2_shuff)
+
 
         # create intervals for PBEs epochs
         # first restrict to current session and to track + pre/post intervals
@@ -409,9 +448,11 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         results[current_area]['df'] = temp_df
 
         results[current_area]['session'] = session
-        results[current_area]['decoding_r2'] = rvalue
+        results[current_area]['decoding_r2'] = decoding_r2
+        results[current_area]['decoding_r2_pval'] = decoding_r2_pval
         results[current_area]['decoding_mean_error'] = mean_error
         results[current_area]['total_units'] = total_units
+        
 
     return results
 
