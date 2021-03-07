@@ -5,7 +5,7 @@ import nelpy as nel
 import nelpy.plotting as npl
 import numpy as np
 
-def plot_all_PBEs(bst, spiketrainarray, tuningcurve, tc_placecells, idx=None, title_str=None):
+def plot_all_PBEs(bst, spiketrainarray, tuningcurve, tc_placecells, idx=None, title_str=None,vmax=.1):
     if idx is not None:
         bst = bst[idx]
     st = spiketrainarray
@@ -20,14 +20,16 @@ def plot_all_PBEs(bst, spiketrainarray, tuningcurve, tc_placecells, idx=None, ti
     st_cut = nel.utils.collapse_time(st_cut)
 
     # decode neural activity
-    posterior, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst=bst, ratemap=tc, xmax=100)
+    posterior, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst=bst, ratemap=tc, xmax=120)
 
     with npl.FigureManager(show=True, figsize=(0.2*bst.n_bins,4)) as (fig, ax):
         npl.utils.skip_if_no_output(fig)
 
         pixel_width = 0.5
-
-        npl.imagesc(x=np.arange(bst.n_bins), y=np.arange(121), data=posterior, cmap=plt.cm.bone_r, ax=ax,vmax=.1)
+        if vmax == False:
+            npl.imagesc(x=np.arange(bst.n_bins), y=np.arange(121), data=posterior, cmap=plt.cm.bone_r, ax=ax)
+        else:
+            npl.imagesc(x=np.arange(bst.n_bins), y=np.arange(121), data=posterior, cmap=plt.cm.bone_r, ax=ax,vmax=vmax)
 #         npl.utils.yticks_interval(310)
         npl.utils.no_yticks(ax)
         # plt.imshow(posterior, cmap=plt.cm.Spectral_r, interpolation='none', aspect='auto')
