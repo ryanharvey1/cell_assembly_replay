@@ -92,9 +92,9 @@ def decode_and_score(bst, tc, pos):
                                                                     xmax=np.nanmax(pos.data))
     actual_pos = pos(bst.bin_centers)
     slope, intercept, rvalue, pvalue, stderr = stats.linregress(actual_pos, mode_pth)
-    mean_error = np.mean(np.abs(actual_pos - mode_pth))
+    median_error = np.nanmedian(np.abs(actual_pos - mode_pth))
     
-    return rvalue,mean_error
+    return rvalue,median_error
 
 def pooled_incoherent_shuffle_bst(bst):
     out = copy.deepcopy(bst)
@@ -110,18 +110,18 @@ def decode_and_shuff(bst, tc, pos, n_shuffles=500):
     """
     """
     
-    rvalue, mean_error = decode_and_score(bst, tc, pos)
+    rvalue, median_error = decode_and_score(bst, tc, pos)
 
     scores = np.zeros(bst.n_epochs)
     if n_shuffles > 0:
         rvalue_time_swap = np.zeros((n_shuffles,1))
-        mean_error_time_swap = np.zeros((n_shuffles,1))
+        median_error_time_swap = np.zeros((n_shuffles,1))
         
     for shflidx in range(n_shuffles):
         bst_shuff = pooled_incoherent_shuffle_bst(bst)
-        rvalue_time_swap[shflidx], mean_error_time_swap[shflidx] = decode_and_score(bst_shuff, tc, pos)
+        rvalue_time_swap[shflidx], median_error_time_swap[shflidx] = decode_and_score(bst_shuff, tc, pos)
             
-    return rvalue, mean_error, rvalue_time_swap, mean_error_time_swap
+    return rvalue, median_error, rvalue_time_swap, median_error_time_swap
 
 def score_array(posterior):
     """
@@ -247,13 +247,16 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type, fig
         x = bst_placecells[idx].bin_centers
         y = mode_pth[bdries[idx]:bdries[idx+1]]
 
+        x = x[~nan_loc]
+        y = y[~nan_loc]
+
         # get spatial difference between bins
-        dy = np.abs(np.diff(y));
+        dy = np.abs(np.diff(y))
         # get cumulative distance 
         traj_dist.append(np.nansum(dy))
-        #  calculate avg speed of trajectory (dist(cm) / time(sec))
+        # calculate avg speed of trajectory (dist(cm) / time(sec))
         traj_speed.append(np.nansum(dy) / (np.nanmax(x) - np.nanmin(x)))
-        #  get mean step size 
+        # get mean step size 
         traj_step.append(np.nanmean(dy))
 
         rsquared,slope,intercept,log_like = score_array(posterior_array)
@@ -328,21 +331,26 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         #     sigma = 0.3 # 300 ms spike smoothing
         bst_run = st_run.bin(ds=ds_50ms).smooth(sigma=0.3 , inplace=True).rebin(w=ds_run/ds_50ms)
 
-        sigma = 0.2 # smoothing std dev in cm
+        sigma = 3 # smoothing std dev in cm
         tc = nel.TuningCurve1D(bst=bst_run,
                                extern=pos,
                                n_extern=40,
                                extmin=0,
                                extmax=maze_size_cm,
                                sigma=sigma,
-                               min_duration=1)
+                               min_duration=0)
 
-        # locate pyr cells that have at least 100 spikes and a peak rate at least 1 Hz
+        # locate pyr cells with >= 100 spikes, peak rate >= 1 Hz, peak/mean ratio >=1.5
+        peak_firing_rates = tc.max(axis=1)
+        mean_firing_rates = tc.mean(axis=1)
+        ratio = peak_firing_rates/mean_firing_rates
         temp_df = df_cell_class[(df_cell_class.session == session) & (df_cell_class.area == current_area)]
         unit_ids_to_keep = (np.where(((temp_df.cell_type == "pyr")) &
                                      (temp_df.n_spikes >=100) &
-                                     (tc.ratemap.max(axis=1) >=1) )[0]+1).squeeze().tolist()
-        
+                                     (tc.ratemap.max(axis=1) >= 1) &
+                                     (ratio>=1.5))[0]+1).squeeze().tolist()
+
+    
         if isinstance(unit_ids_to_keep, int):
             print('warning: only 1 unit')
             results[current_area] = {}
@@ -358,7 +366,7 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         # tc.reorder_units(inplace=True)
 
         # access decoding accuracy on behavioral time scale 
-        decoding_r2, mean_error, decoding_r2_shuff, _ = decode_and_shuff(bst_run.loc[:,unit_ids_to_keep],
+        decoding_r2, median_error, decoding_r2_shuff, _ = decode_and_shuff(bst_run.loc[:,unit_ids_to_keep],
                                                                          tc,
                                                                          pos,
                                                                          n_shuffles=1000)
@@ -372,8 +380,9 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
                           ((mua_df.ep_type == "pedestal_1") |
                            (mua_df.ep_type == "track") |
                            (mua_df.ep_type == "pedestal_2")))]
-        # restrict to events at least 100ms
-        temp_df = temp_df[temp_df.ripple_duration >= 0.1]
+        
+        # restrict to events at least 80ms
+        temp_df = temp_df[temp_df.ripple_duration >= 0.08]
         
         if temp_df.shape[0] == 0:
             print('warning: no PBE events')
@@ -450,7 +459,7 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         results[current_area]['session'] = session
         results[current_area]['decoding_r2'] = decoding_r2
         results[current_area]['decoding_r2_pval'] = decoding_r2_pval
-        results[current_area]['decoding_mean_error'] = mean_error
+        results[current_area]['decoding_median_error'] = median_error
         results[current_area]['total_units'] = total_units
         
 
