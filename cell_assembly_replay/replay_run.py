@@ -1,4 +1,3 @@
-import matplotlib.pyplot as plt
 import numpy as np
 import struct
 
@@ -15,6 +14,7 @@ import statistics
 import math
 from scipy import stats
 from nelpy.analysis import replay
+from nelpy.decoding import get_mode_pth_from_array
 
 import multiprocessing
 from joblib import Parallel, delayed
@@ -22,6 +22,11 @@ from joblib import Parallel, delayed
 import statsmodels.api as sm
 import pickle
 import copy
+from sklearn.isotonic import IsotonicRegression
+from scipy.special import cotdg
+from skimage.transform import radon
+from scipy.stats import multivariate_normal, rv_histogram
+import warnings
 
 def rescale(x,new_min,new_max):
     """
@@ -123,6 +128,107 @@ def decode_and_shuff(bst, tc, pos, n_shuffles=500):
             
     return rvalue, median_error, rvalue_time_swap, median_error_time_swap
 
+def _m(x, w):
+    """Weighted Mean"""
+    return np.sum(x * w) / np.sum(w)
+
+
+def _cov(x, y, w):
+    """Weighted Covariance"""
+    return np.sum(w * (x - _m(x, w)) * (y - _m(y, w))) / np.sum(w)
+
+
+def _corr(x, y, w):
+    """Weighted Correlation"""
+    return _cov(x, y, w) / np.sqrt(_cov(x, x, w) * _cov(y, y, w))
+
+def weighted_correlation(posterior, time, place_bin_centers):
+    """ From Eric Denovellis """
+    place_bin_centers = place_bin_centers.squeeze()
+    posterior[np.isnan(posterior)] = 0.0
+
+    return _corr(time[:, np.newaxis],
+                 place_bin_centers[np.newaxis, :], posterior)
+
+def convert_polar_to_slope_intercept(
+    n_pixels_from_center, projection_angle, center_pixel
+):
+    """ From Eric Denovellis """
+    velocity = -cotdg(-projection_angle)
+    start_position = (
+        n_pixels_from_center / np.sin(-np.deg2rad(projection_angle))
+        - velocity * center_pixel[0]
+        + center_pixel[1]
+    )
+    return start_position, velocity
+
+def detect_line_with_radon(
+    posterior,
+    dt,  # s
+    dp,  # cm
+    projection_angles=np.arange(-90, 90, 0.5),  # degrees
+    filter_invalid_positions=True,
+    incorporate_nearby_positions=True,
+    nearby_positions_max=15,  # cm
+):
+
+    if incorporate_nearby_positions:
+        n_nearby_bins = int(nearby_positions_max / 2 // dp)
+        filt = np.ones(2 * n_nearby_bins + 1)
+        posterior = np.apply_along_axis(
+            lambda time_bin: np.convolve(time_bin, filt, mode="same"),
+            axis=1, arr=posterior
+        )
+    else:
+        n_nearby_bins = 1
+    # Sinogram is shape (pixels_from_center, projection_angles)
+    sinogram = radon(
+        posterior.T, theta=projection_angles, circle=False,
+        preserve_range=False
+    )
+    n_time, n_position_bins = posterior.shape
+    center_pixel = np.asarray((n_time // 2, n_position_bins // 2))
+    pixels_from_center = np.arange(
+        -sinogram.shape[0] // 2 + 1, sinogram.shape[0] // 2 + 1)
+
+    if filter_invalid_positions:
+        start_positions, velocities = convert_polar_to_slope_intercept(
+            pixels_from_center[:, np.newaxis],
+            projection_angles[np.newaxis, :],
+            center_pixel,
+        )
+        end_positions = start_positions + velocities * (n_time - 1)
+        sinogram[(start_positions < 0) |
+                 (start_positions > n_position_bins - 1)] = 0.0
+        sinogram[(end_positions < 0) |
+                 (end_positions > n_position_bins - 1)] = 0.0
+        sinogram[:, np.isinf(velocities.squeeze())] = 0.0
+
+    # Find the maximum of the sinogram
+    n_pixels_from_center_ind, projection_angle_ind = np.unravel_index(
+        indices=np.argmax(sinogram), shape=sinogram.shape
+    )
+    projection_angle = projection_angles[projection_angle_ind]
+    n_pixels_from_center = pixels_from_center[n_pixels_from_center_ind]
+
+    # Normalized score based on the integrated projection
+    score = np.max(sinogram) / (n_time * n_nearby_bins)
+
+    # Convert from polar form to slope-intercept form
+    start_position, velocity = convert_polar_to_slope_intercept(
+        n_pixels_from_center, projection_angle, center_pixel
+    )
+
+    # Convert from pixels to position units
+    start_position *= dp
+    velocity *= dp / dt
+
+    # Estimate position for the posterior
+    time = np.arange(n_time) * dt
+    radon_position = start_position + velocity * time
+
+    return start_position, velocity, radon_position, score
+
 def score_array(posterior):
     """
     takes in posterior matrix (distance by time) and conducts
@@ -168,31 +274,61 @@ def get_score_coef(bst,bdries,posterior):
         scores[idx],slope[idx],intercept[idx],log_like[idx] = score_array(posterior_array)
     return scores,slope,intercept,log_like
 
-def get_scores(bst, posterior, bdries, n_shuffles=500):
-    """
-    runs score_array on observed data and then conducts a shuffle analysis using
-    two types of procedures (time swap and column cycle).
+# def get_scores(bst, posterior, bdries, n_shuffles=500,dt=0.02,dp=3,max_position=120):
+#     """
+#     runs score_array on observed data and then conducts a shuffle analysis using
+#     two types of procedures (time swap and column cycle).
     
-    Will run through each epoch in your binned spike train
-    """
-#     posterior, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst, tuningcurve, xmin=0, xmax=120)
+#     Will run through each epoch in your binned spike train
+#     """
+# #     posterior, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst, tuningcurve, xmin=0, xmax=120)
 
-    scores = np.zeros(bst.n_epochs)
-    if n_shuffles > 0:
-        scores_time_swap = np.zeros((n_shuffles, bst.n_epochs))
-        scores_col_cycle = np.zeros((n_shuffles, bst.n_epochs))
-
-    for idx in range(bst.n_epochs):
-        posterior_array = posterior[:, bdries[idx]:bdries[idx+1]]
-        scores[idx],_,_,_ = score_array(posterior_array)
+#     place_bin_edges = np.arange(0, max_position + dp, dp)
+#     place_bin_centers = place_bin_edges[:-1] + np.diff(place_bin_edges) / 2
         
-        for shflidx in range(n_shuffles):
-            posterior_ts = replay.time_swap_array(posterior_array)
-            posterior_cs = replay.column_cycle_array(posterior_array)
-            scores_time_swap[shflidx, idx],_,_,_  = score_array(posterior=posterior_ts)
-            scores_col_cycle[shflidx, idx],_,_,_  = score_array(posterior=posterior_cs)
+#     wls_scores = np.zeros(bst.n_epochs)
+#     radon_scores = np.zeros(bst.n_epochs)
+#     w_corr_scores = np.zeros(bst.n_epochs)
+    
+#     if n_shuffles > 0:
+#         wls_time_swap = np.zeros((n_shuffles, bst.n_epochs))
+#         wls_col_cycle = np.zeros((n_shuffles, bst.n_epochs))
+#         radon_time_swap = np.zeros((n_shuffles, bst.n_epochs))
+#         radon_col_cycle = np.zeros((n_shuffles, bst.n_epochs))
+#         w_corr_time_swap = np.zeros((n_shuffles, bst.n_epochs))
+#         w_corr_col_cycle = np.zeros((n_shuffles, bst.n_epochs))
+        
+#     for idx in range(bst.n_epochs):
+#         posterior_array = posterior[:, bdries[idx]:bdries[idx+1]]
+#         wls_scores[idx],_,_,_ = score_array(posterior_array)
+#         _, _, _, radon_scores[idx] = detect_line_with_radon(posterior_array.T,dt,dp)
+#         time = bst[idx].bin_centers
+#         w_corr_scores[idx] = weighted_correlation(posterior_array.T, time, place_bin_centers)
+
+#         for shflidx in range(n_shuffles):
+#             posterior_ts = replay.time_swap_array(posterior_array)
+#             posterior_cs = replay.column_cycle_array(posterior_array)
             
-    return scores, scores_time_swap, scores_col_cycle  
+#             wls_time_swap[shflidx, idx],_,_,_  = score_array(posterior=posterior_ts)
+#             wls_col_cycle[shflidx, idx],_,_,_  = score_array(posterior=posterior_cs)
+            
+#             _, _, _, radon_time_swap[shflidx, idx] = detect_line_with_radon(posterior_ts.T,dt,dp)
+#             _, _, _, radon_col_cycle[shflidx, idx] = detect_line_with_radon(posterior_cs.T,dt,dp)
+            
+#             w_corr_time_swap[shflidx, idx] = weighted_correlation(posterior_ts.T, time, place_bin_centers)
+#             w_corr_col_cycle[shflidx, idx] = weighted_correlation(posterior_cs.T, time, place_bin_centers)
+
+#     return (
+#         wls_scores,
+#         radon_scores,
+#         w_corr_scores,
+#         wls_time_swap,
+#         wls_col_cycle,
+#         radon_time_swap,
+#         radon_col_cycle,
+#         w_corr_time_swap,
+#         w_corr_col_cycle
+#     )
 
 def get_significant_events(scores, shuffled_scores, q=95):
     """Return the significant events based on percentiles.
@@ -228,27 +364,142 @@ def get_significant_events(scores, shuffled_scores, q=95):
 
     return np.atleast_1d(sig_event_idx), np.atleast_1d(pvalues)
 
-def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type, figs=False):
+def shuff(posterior_array,time,place_bin_centers,dt,dp):
+    
+    posterior_ts = replay.time_swap_array(posterior_array)
+    posterior_cs = replay.column_cycle_array(posterior_array)
+
+#     radon_time_swap = detect_line_with_radon(posterior_ts,
+#                                             dt,
+#                                             dp,
+#                                             incorporate_nearby_positions=False)
+    
+#     radon_col_cycle = detect_line_with_radon(posterior_cs,
+#                                             dt,
+#                                             dp,
+#                                             incorporate_nearby_positions=False)
+
+    w_corr_time_swap = weighted_correlation(posterior_ts, time, place_bin_centers)
+    w_corr_col_cycle = weighted_correlation(posterior_cs, time, place_bin_centers)
+    
+    return w_corr_time_swap,w_corr_col_cycle
+#     return radon_time_swap[-1],radon_col_cycle[-1],w_corr_time_swap,w_corr_col_cycle
+
+def get_scores(bst, posterior, bdries, n_shuffles=1000,dt=0.02,dp=3,max_position=120,verbose=False):
+    """
+    runs score_array on observed data and then conducts a shuffle analysis using
+    two types of procedures (time swap and column cycle).
+    
+    Will run through each epoch in your binned spike train
+    """
+
+    place_bin_edges = np.arange(0, max_position + dp, dp)
+    place_bin_centers = place_bin_edges[:-1] + np.diff(place_bin_edges) / 2
+        
+    radon_scores = np.zeros(bst.n_epochs)
+    w_corr_scores = np.zeros(bst.n_epochs)
+    radon_pval_time_swap = np.zeros(bst.n_epochs)
+    radon_pval_col_cycle = np.zeros(bst.n_epochs)
+    w_corr_pval_time_swap = np.zeros(bst.n_epochs)
+    w_corr_pval_col_cycle = np.zeros(bst.n_epochs) 
+    
+    # get n cores to know how many jobs to run  
+    num_cores = multiprocessing.cpu_count()         
+    
+    for idx in range(bst.n_epochs):
+        if verbose:
+            print('event: ',str(idx))
+            
+        posterior_array = posterior[:, bdries[idx]:bdries[idx+1]]
+#         _, _, _, radon_scores[idx] = detect_line_with_radon(posterior_array.T,
+#                                                             dt,
+#                                                             dp,
+#                                                             incorporate_nearby_positions=False)
+        time = bst[idx].bin_centers
+        w_corr_scores[idx] = weighted_correlation(posterior_array.T, time, place_bin_centers)
+            
+        (
+            w_corr_time_swap,
+            w_corr_col_cycle
+        ) = zip(*Parallel(n_jobs=num_cores)(delayed(shuff)(posterior_array.T,
+                                                           time,
+                                                           place_bin_centers,
+                                                           dt,
+                                                           dp) for i in range(n_shuffles)))
+        
+#         _,radon_pval_time_swap[idx] = get_significant_events(radon_scores[idx], np.expand_dims(radon_time_swap, axis=1))
+#         _,radon_pval_col_cycle[idx] = get_significant_events(radon_scores[idx], np.expand_dims(radon_col_cycle, axis=1))
+        _,w_corr_pval_time_swap[idx] = get_significant_events(w_corr_scores[idx], np.expand_dims(w_corr_time_swap, axis=1))
+        _,w_corr_pval_col_cycle[idx] = get_significant_events(w_corr_scores[idx], np.expand_dims(w_corr_col_cycle, axis=1))
+        
+    return (
+        w_corr_scores,
+        w_corr_pval_time_swap,
+        w_corr_pval_col_cycle
+    )
+
+def map_estimate(posterior, place_bin_centers):
+    """ From Eric Denovellis """
+    posterior[np.isnan(posterior)] = 0.0
+    return place_bin_centers[posterior.argmax(axis=1)].squeeze()
+
+def isotonic_regression(posterior, time, place_bin_centers):
+    """ From Eric Denovellis """
+    place_bin_centers = place_bin_centers.squeeze()
+    posterior[np.isnan(posterior)] = 0.0
+
+    map_ = map_estimate(posterior, place_bin_centers)
+    map_probabilities = np.max(posterior, axis=1)
+
+    regression = IsotonicRegression(increasing='auto').fit(
+        X=time,
+        y=map_,
+        sample_weight=map_probabilities,
+    )
+
+    prediction = regression.predict(time)
+
+    return prediction
+
+def get_features(bst_placecells,
+                 posteriors,
+                 bdries,
+                 mode_pth,
+                 pos,
+                 ep_type,
+                 figs=False,
+                 max_position=120,
+                 dt=0.02,
+                 dp=3):
     """
     Using the posterior probability matrix, calculate several features on spatial trajectory
     and detects if the trajectory is foward or reverse depending on the rat's current position
     """
+    
+    place_bin_edges = np.arange(0, max_position + dp, dp)
+    place_bin_centers = place_bin_edges[:-1] + np.diff(place_bin_edges) / 2
+    
     traj_dist = []
     traj_speed = []
     traj_step = []
     replay_type = []
     dist_rat_start = []
     dist_rat_end = []
+    position = []
+
     for idx in range(bst_placecells.n_epochs):
         posterior_array = posteriors[:, bdries[idx]:bdries[idx+1]]
 
-        nan_loc = np.isnan(posterior_array).any(axis=0)
-
         x = bst_placecells[idx].bin_centers
-        y = mode_pth[bdries[idx]:bdries[idx+1]]
 
-        x = x[~nan_loc]
-        y = y[~nan_loc]
+        y = get_mode_pth_from_array(posterior_array)
+        x = x[~np.isnan(y)]
+        y = y[~np.isnan(y)]
+        velocity, intercept, rvalue, pvalue, stderr = stats.linregress(x, y)
+        y = x*velocity+intercept
+#         slope, intercept, rsquared = linregress_array(posterior=posterior)
+
+        position.append(y)
 
         # get spatial difference between bins
         dy = np.abs(np.diff(y))
@@ -258,8 +509,9 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type, fig
         traj_speed.append(np.nansum(dy) / (np.nanmax(x) - np.nanmin(x)))
         # get mean step size 
         traj_step.append(np.nanmean(dy))
-
-        rsquared,slope,intercept,log_like = score_array(posterior_array)
+        
+        # get slope to see the direction of replay
+#         _,slope,_,_ = score_array(posterior_array)
         
         rat_event_pos = np.interp(x,pos.abscissa_vals,pos.data[0])
         rat_x_position = np.nanmean(rat_event_pos)
@@ -272,13 +524,13 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type, fig
         else:
             # what side of the track is the rat on ? 
             side = np.argmin(np.abs([0,120] - rat_x_position))
-            if (side == 1) & (slope < 0):
+            if (side == 1) & (velocity < 0):
                 replay_type.append('forward')
-            elif (side == 1) & (slope > 0):
+            elif (side == 1) & (velocity > 0):
                 replay_type.append('reverse')
-            elif (side == 0) & (slope < 0):
+            elif (side == 0) & (velocity < 0):
                 replay_type.append('reverse')
-            elif (side == 0) & (slope > 0):
+            elif (side == 0) & (velocity > 0):
                 replay_type.append('forward')
             else:
                 replay_type.append(np.nan)
@@ -291,13 +543,14 @@ def get_features(bst_placecells, posteriors, bdries, mode_pth, pos, ep_type, fig
             ax.scatter(x[-1],y[-1],color='r')
             ax.set_title(replay_type[idx])
 
-    return traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end
+    return traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end,position
 
-def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
+def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,verbose=False):
     """
     Main function that conducts the replay analysis
     """
-
+    if verbose:
+        print('loading data')
     maze_size_cm,pos,st_all = get_base_data(data_path,spike_path,session)
 
     # to make everything more simple, lets restrict to just the linear track
@@ -317,7 +570,9 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
     # loop through each area seperately
     areas = df_cell_class.area[df_cell_class.session == session] 
     for current_area in pd.unique(areas):
-        
+        if verbose:
+            print('running through: ',current_area)  
+            
         # subset units to current area
         st = st_all._unit_subset(np.where(areas==current_area)[0]+1)
         # reset unit ids like the other units never existed
@@ -352,11 +607,11 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
 
     
         if isinstance(unit_ids_to_keep, int):
-            print('warning: only 1 unit')
+            print('warning: only 1 unit...skipping')
             results[current_area] = {}
             continue
         elif len(unit_ids_to_keep) == 0:
-            print('warning: no units')
+            print('warning: no units...skipping')
             results[current_area] = {}
             continue
             
@@ -364,7 +619,10 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         tc = tc._unit_subset(unit_ids_to_keep)
         total_units = sta_placecells.n_active
         # tc.reorder_units(inplace=True)
-
+        
+        if verbose:
+            print('decoding and scoring position')  
+            
         # access decoding accuracy on behavioral time scale 
         decoding_r2, median_error, decoding_r2_shuff, _ = decode_and_shuff(bst_run.loc[:,unit_ids_to_keep],
                                                                          tc,
@@ -372,7 +630,11 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
                                                                          n_shuffles=1000)
         # check decoding quality against chance distribution
         _, decoding_r2_pval = get_significant_events(decoding_r2, decoding_r2_shuff)
-
+        
+        if decoding_r2_pval > 0.05:
+            print('warning: poor decoding...skipping')
+            results[current_area] = {}
+            continue
 
         # create intervals for PBEs epochs
         # first restrict to current session and to track + pre/post intervals
@@ -385,7 +647,7 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         temp_df = temp_df[temp_df.ripple_duration >= 0.08]
         
         if temp_df.shape[0] == 0:
-            print('warning: no PBE events')
+            print('warning: no PBE events...skipping')
             results[current_area] = {}
             continue
             
@@ -410,25 +672,33 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
                                                                        tc,
                                                                        xmin=0,
                                                                        xmax=maze_size_cm)
-        # score each event using weighted regression
-        scores, scores_time_swap, scores_col_cycle = get_scores(bst_placecells,
-                                                                posteriors,
-                                                                bdries,
-                                                                n_shuffles=1000)
-    #     scores, scores_shuffled, percentile = replay.score_Davidson_final_bst_fast(bst_placecells,
-    #                                                                                tc,w=0,n_shuffles=500,
-    #                                                                                n_samples=1000) #Davidson method very slow
-        # find sig events using time and column shuffle distributions
-        sig_event_idx,pvalues_time_swap = get_significant_events(scores, scores_time_swap)
-        sig_event_idx,pvalues_col_cycle = get_significant_events(scores, scores_col_cycle)
+        # score each event using trajectory_score_bst (sums the posterior probability in a range (w) from the LS line)
+        if verbose:
+            print('scoring events')  
 
-        traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end = get_features(bst_placecells,
-                                                                                              posteriors,
-                                                                                              bdries,
-                                                                                              mode_pth,
-                                                                                              pos,
-                                                                                              list(temp_df.ep_type))
-        _,slope,intercept,log_like = get_score_coef(bst_placecells,bdries,posteriors)
+        scores, scores_time_swap, scores_col_cycle = replay.trajectory_score_bst(bst_placecells,
+                                                                                 tc,
+                                                                                 w=3,
+                                                                                 n_shuffles=1500)
+        
+        # find sig events using time and column shuffle distributions
+        _,score_pval_time_swap = get_significant_events(scores, scores_time_swap)
+        _,score_pval_col_cycle = get_significant_events(scores, scores_col_cycle)
+
+
+        if verbose:
+            print('extracting features')  
+        (
+            traj_dist,
+            traj_speed,
+            traj_step,
+            replay_type,
+            dist_rat_start,
+            dist_rat_end,
+            position
+        ) = get_features(bst_placecells,posteriors,bdries,mode_pth,pos,list(temp_df.ep_type))
+        
+        slope, intercept, r2values = replay.linregress_bst(bst_placecells, tc)
     
         # package data into results dictionary
         results[current_area] = {}
@@ -439,15 +709,16 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class):
         results[current_area]['posteriors'] = posteriors
         results[current_area]['bdries'] = bdries
         results[current_area]['mode_pth'] = mode_pth
+        results[current_area]['position'] = position
 
         # add event by event metrics to df
         temp_df['n_active'] = n_active
-        temp_df['scores'] = scores
+        temp_df['trajectory_score'] = scores
+        temp_df['r_squared'] = r2values
         temp_df['slope'] = slope
         temp_df['intercept'] = intercept
-        temp_df['log_like'] = log_like
-        temp_df['pvalues_time_swap'] = pvalues_time_swap
-        temp_df['pvalues_col_cycle'] = pvalues_col_cycle
+        temp_df['score_pval_time_swap'] = score_pval_time_swap
+        temp_df['score_pval_col_cycle'] = score_pval_col_cycle
         temp_df['traj_dist'] = traj_dist
         temp_df['traj_speed'] = traj_speed
         temp_df['traj_step'] = traj_step
@@ -489,6 +760,8 @@ def replay_run(data_path,spike_path,save_path,mua_df,df_cell_class,parallel=True
     function to loop through each session
     you can use a basic loop or run in parallel
     """
+    warnings.filterwarnings('ignore')
+
     # find sessions to run
     sessions = pd.unique(mua_df.session)
 
