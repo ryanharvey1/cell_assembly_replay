@@ -492,7 +492,8 @@ def get_features(bst_placecells,
 
         x = bst_placecells[idx].bin_centers
 
-        y = get_mode_pth_from_array(posterior_array)
+#         y = get_mode_pth_from_array(posterior_array,tuningcurve=tc)
+        y = mode_pth[bdries[idx]:bdries[idx+1]]
         x = x[~np.isnan(y)]
         y = y[~np.isnan(y)]
         velocity, intercept, rvalue, pvalue, stderr = stats.linregress(x, y)
@@ -516,8 +517,9 @@ def get_features(bst_placecells,
         rat_event_pos = np.interp(x,pos.abscissa_vals,pos.data[0])
         rat_x_position = np.nanmean(rat_event_pos)
         
-        dist_rat_start.append(np.abs(rat_x_position - y[0]))
-        dist_rat_end.append(np.abs(rat_x_position - y[-1]))
+        # get dist of the start & end of trajectory to rat
+        dist_rat_start.append(rat_x_position - y[0])
+        dist_rat_end.append(rat_x_position - y[-1])
 
         if ep_type[idx] != "track":
             replay_type.append(np.nan)
@@ -638,11 +640,12 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,verbose=
 
         # create intervals for PBEs epochs
         # first restrict to current session and to track + pre/post intervals
-        temp_df = mua_df[((mua_df.session == session) &
-                          ((mua_df.ep_type == "pedestal_1") |
-                           (mua_df.ep_type == "track") |
-                           (mua_df.ep_type == "pedestal_2")))]
-        
+#         temp_df = mua_df[((mua_df.session == session) &
+#                           ((mua_df.ep_type == "pedestal_1") |
+#                            (mua_df.ep_type == "track") |
+#                            (mua_df.ep_type == "pedestal_2")))]
+        temp_df = mua_df[mua_df.session == session]
+    
         # restrict to events at least 80ms
         temp_df = temp_df[temp_df.ripple_duration >= 0.08]
         
@@ -660,18 +663,23 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,verbose=
         # count units per event
         n_active = [bst.n_active for bst in bst_placecells]
         n_active = np.array(n_active) 
-        # restrict bst to instances with >= 5 active units
-        idx = n_active >= 5
+        # also count the proportion of bins in each event with 0 activity
+        inactive_bin_prop = [sum(bst.n_active_per_bin == 0) / bst.lengths[0] for bst in bst_placecells]
+        inactive_bin_prop = np.array(inactive_bin_prop) 
+        # restrict bst to instances with >= 5 active units and < 50% inactive bins
+        idx = (n_active >= 5) & (inactive_bin_prop < .5)
         bst_placecells = bst_placecells[np.where(idx)[0]]
         # restrict df to instances with >= 5 active units
         temp_df = temp_df[idx]
         n_active = n_active[idx]
+        inactive_bin_prop = inactive_bin_prop[idx]
 
         # decode each event
         posteriors, bdries, mode_pth, mean_pth = nel.decoding.decode1D(bst_placecells,
                                                                        tc,
                                                                        xmin=0,
                                                                        xmax=maze_size_cm)
+                
         # score each event using trajectory_score_bst (sums the posterior probability in a range (w) from the LS line)
         if verbose:
             print('scoring events')  
@@ -679,7 +687,8 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,verbose=
         scores, scores_time_swap, scores_col_cycle = replay.trajectory_score_bst(bst_placecells,
                                                                                  tc,
                                                                                  w=3,
-                                                                                 n_shuffles=1500)
+                                                                                 n_shuffles=1500,
+                                                                                 normalize=True)
         
         # find sig events using time and column shuffle distributions
         _,score_pval_time_swap = get_significant_events(scores, scores_time_swap)
@@ -713,6 +722,7 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,verbose=
 
         # add event by event metrics to df
         temp_df['n_active'] = n_active
+        temp_df['inactive_bin_prop'] = inactive_bin_prop
         temp_df['trajectory_score'] = scores
         temp_df['r_squared'] = r2values
         temp_df['slope'] = slope
