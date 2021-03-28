@@ -488,7 +488,7 @@ def get_features(bst_placecells,
     position = []
 
     for idx in range(bst_placecells.n_epochs):
-        posterior_array = posteriors[:, bdries[idx]:bdries[idx+1]]
+#         posterior_array = posteriors[:, bdries[idx]:bdries[idx+1]]
 
         x = bst_placecells[idx].bin_centers
 
@@ -516,14 +516,16 @@ def get_features(bst_placecells,
         
         rat_event_pos = np.interp(x,pos.abscissa_vals,pos.data[0])
         rat_x_position = np.nanmean(rat_event_pos)
-        
-        # get dist of the start & end of trajectory to rat
-        dist_rat_start.append(rat_x_position - y[0])
-        dist_rat_end.append(rat_x_position - y[-1])
 
         if ep_type[idx] != "track":
             replay_type.append(np.nan)
+            # get dist of the start & end of trajectory to rat
+            dist_rat_start.append(np.nan)
+            dist_rat_end.append(np.nan)
         else:
+            # get dist of the start & end of trajectory to rat
+            dist_rat_start.append(rat_x_position - y[0])
+            dist_rat_end.append(rat_x_position - y[-1])
             # what side of the track is the rat on ? 
             side = np.argmin(np.abs([0,120] - rat_x_position))
             if (side == 1) & (velocity < 0):
@@ -547,7 +549,7 @@ def get_features(bst_placecells,
 
     return traj_dist,traj_speed,traj_step,replay_type,dist_rat_start,dist_rat_end,position
 
-def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,verbose=False):
+def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,traj_shuff=1500,verbose=False):
     """
     Main function that conducts the replay analysis
     """
@@ -687,7 +689,7 @@ def run_all(session,data_path,spike_path,save_path,mua_df,df_cell_class,verbose=
         scores, scores_time_swap, scores_col_cycle = replay.trajectory_score_bst(bst_placecells,
                                                                                  tc,
                                                                                  w=3,
-                                                                                 n_shuffles=1500,
+                                                                                 n_shuffles=traj_shuff,
                                                                                  normalize=True)
         
         # find sig events using time and column shuffle distributions
